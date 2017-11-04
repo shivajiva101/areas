@@ -1,36 +1,119 @@
+local WP = minetest.get_worldpath()
+local ie = areas.ie
+areas.ie = nil -- remove global
+if not ie then
+	error("insecure environment inaccessible"..
+		" - make sure this mod has been added to minetest.conf!")
+end
+
+-- Requires library for db access
+local _sql = ie.require("lsqlite3")
+if sqlite3 then sqlite3 = nil end
+local db = _sql.open(WP.."/areas.sqlite") -- connection
+
+-- Create db:exec wrapper for error reporting
+local function db_exec(stmt)
+	if db:exec(stmt) ~= _sql.OK then
+		minetest.log("info", "Sqlite ERROR:  ", db:errmsg())
+	end
+end
+
+local create_db = [[
+CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY,
+name VARCHAR(32), pos1 VARCHAR(512), pos2 VARCHAR(512),
+owner VARCHAR(32), parent INTEGER, open BOOLEAN);
+CREATE TABLE IF NOT EXISTS _s (import BOOLEAN);
+]]
+db_exec(create_db)
+
+-- Return a specific record by id
+function areas:get_record(id)
+	local query = ("SELECT * FROM areas WHERE id = %i LIMIT 1;"):format(id)
+	for row in db:nrows(query) do
+		return row
+	end
+end
+
+-- Return all area records
+function areas:get_records()
+	local result = {}
+	local query = "SELECT * FROM areas;"
+	for row in db:nrows(query) do
+		table.insert(result, row)
+	end
+	return result
+end
+
+-- Update single field in a record by id
+function areas:update_by_id(id, field, data)
+	local stmt = ([[
+		UPDATE areas SET %s = '%s' WHERE id = %i
+	]]):format(field, data, id)
+	db_exec(stmt)
+end
+
+-- Update existing or create new record
+function areas:save_record(id, data)
+	local r = data
+	if self:get_record(id) then
+		-- Update
+		local stmt = ([[
+		UPDATE areas
+		SET name = '%s',
+			pos1 = '%s',
+			pos2 = '%s',
+			owner = '%s',
+			parent = '%s',
+			open = '%s'
+		WHERE
+			id = %i;
+		]]):format(r.name, r.pos1, r.pos2, r.owner, r.parent, r.open, id)
+		db_exec(stmt)
+		return
+	end
+	-- Insert record
+	local stmt = ([[
+	INSERT INTO areas VALUES('%i', '%s', '%s', '%s', '%s', '%s', '%s')
+	]]):format(id, r.name, r.pos1, r.pos2, r.owner, r.parent, r.open)
+	db_exec(stmt)
+end
+
+-- Delete a db record
+function areas:remove_record(id)
+	local stmt = ([[
+	DELETE FROM areas WHERE id = %i
+	]]):format(id)
+	db_exec(stmt)
+end
+
+-- Populate the cache
+function areas:load_db()
+	local db_records = self:get_records()
+	self.areas = self.areas or {}
+	for _,entry in ipairs(db_records) do
+		self.areas[entry.id] = {
+			name = entry.name,
+			pos1 = minetest.string_to_pos(entry.pos1),
+			pos2 = minetest.string_to_pos(entry.pos2),
+			owner = entry.owner
+		}
+		if entry.parent then self.areas[entry.id].parent = entry.parent end
+		if entry.open == "true" then self.areas[entry.id].open = entry.open end
+	end
+	self:populateStore()
+end
+
+local function get_setting(column)
+	local query = ([[
+		SELECT %s FROM _s
+	]]):format(column)
+	for row in db:nrows(query) do
+		return row
+	end
+end
 
 function areas:player_exists(name)
 	return minetest.get_auth_handler().get_auth(name) ~= nil
-end
-
--- Save the areas table to a file
-function areas:save()
-	local datastr = minetest.serialize(self.areas)
-	if not datastr then
-		minetest.log("error", "[areas] Failed to serialize area data!")
-		return
-	end
-	local file, err = io.open(self.config.filename, "w")
-	if err then
-		return err
-	end
-	file:write(datastr)
-	file:close()
-end
-
--- Load the areas table from the save file
-function areas:load()
-	local file, err = io.open(self.config.filename, "r")
-	if err then
-		self.areas = self.areas or {}
-		return err
-	end
-	self.areas = minetest.deserialize(file:read("*a"))
-	if type(self.areas) ~= "table" then
-		self.areas = {}
-	end
-	file:close()
-	self:populateStore()
 end
 
 --- Checks an AreaStore ID.
@@ -75,17 +158,18 @@ local function findFirstUnusedIndex(t)
 	return i
 end
 
---- Add a area.
+--- Add an area.
 -- @return The new area's ID.
 function areas:add(owner, name, pos1, pos2, parent)
 	local id = findFirstUnusedIndex(self.areas)
-	self.areas[id] = {
+	local entry = {
 		name = name,
 		pos1 = pos1,
 		pos2 = pos2,
 		owner = owner,
 		parent = parent
 	}
+	self.areas[id] = entry
 	-- Add to AreaStore
 	if self.store then
 		local sid = self.store:insert_area(pos1, pos2, tostring(id))
@@ -93,11 +177,17 @@ function areas:add(owner, name, pos1, pos2, parent)
 			self.store_ids[id] = sid
 		end
 	end
+	-- Format record and add to Db
+	entry.pos1 = minetest.pos_to_string(entry.pos1)
+	entry.pos2 = minetest.pos_to_string(entry.pos2)
+	if entry.parent == nil then entry.parent = '' end
+	entry.open = ''
+	self:save_record(id, entry)
 	return id
 end
 
---- Remove a area, and optionally it's children recursively.
--- If a area is deleted non-recursively the children will
+--- Remove an area, and optionally it's children recursively.
+-- If the area is deleted non-recursively the children will
 -- have the removed area's parent as their new parent.
 function areas:remove(id, recurse)
 	if recurse then
@@ -105,6 +195,7 @@ function areas:remove(id, recurse)
 		local cids = self:getChildren(id)
 		for _, cid in pairs(cids) do
 			self:remove(cid, true)
+			self:remove_record(cid)
 		end
 	else
 		-- Update parents
@@ -114,12 +205,14 @@ function areas:remove(id, recurse)
 			-- The subarea parent will be niled out if the
 			-- removed area does not have a parent
 			self.areas[cid].parent = parent
-
+			parent = parent or ''
+			self:update_by_id(cid, "parent", parent)
 		end
 	end
 
 	-- Remove main entry
 	self.areas[id] = nil
+	self:remove_record(id)
 
 	-- Remove from AreaStore
 	if self.store then
@@ -132,6 +225,9 @@ end
 function areas:move(id, area, pos1, pos2)
 	area.pos1 = pos1
 	area.pos2 = pos2
+	-- Update db
+	self:update_by_id(id, "pos1", minetest.pos_to_string(pos1))
+	self:update_by_id(id, "pos2", minetest.pos_to_string(pos2))
 
 	if self.store then
 		self.store:remove_area(areas.store_ids[id])
@@ -142,7 +238,7 @@ function areas:move(id, area, pos1, pos2)
 	end
 end
 
--- Checks if a area between two points is entirely contained by another area.
+-- Checks if an area between two points is entirely contained by another area.
 -- Positions must be sorted.
 function areas:isSubarea(pos1, pos2, id)
 	local area = self.areas[id]
@@ -283,3 +379,46 @@ function areas:isAreaOwner(id, name)
 	return false
 end
 
+-- Import data
+if get_setting("import") == nil then
+	-- This conditional branch runs once the first time
+	-- and manages the importation of the records from the
+	-- areas.dat file to the areas.sqlite database
+	--
+	-- Load the areas table from the db
+	function areas:load()
+		local file, err = io.open(self.config.filename, "r")
+		if err then
+			self.areas = self.areas or {}
+			return err
+		end
+		self.areas = minetest.deserialize(file:read("*a"))
+		if type(self.areas) ~= "table" then
+			self.areas = {}
+		end
+		file:close()
+		self:populateStore()
+	end
+	-- Db import
+	function areas:import_db()
+		for i,entry in ipairs(self.areas) do
+			local r = {
+				name = entry.name,
+				pos1 = minetest.pos_to_string(entry.pos1),
+				pos2 = minetest.pos_to_string(entry.pos2),
+				owner = entry.owner,
+				parent = entry.parent or '',
+				open = entry.open or ''
+			}
+			self:save_record(i, r)
+		end
+	end
+	local function import_task()
+		areas:load()
+		areas:import_db()
+		db_exec([[INSERT INTO _s VALUES('true');]])
+		ie.os.rename(WP.."/areas.dat", WP.."/areas.dat.bak")
+	end
+	-- Execute import after server has started
+	minetest.after(5, import_task)
+end
