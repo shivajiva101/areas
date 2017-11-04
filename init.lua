@@ -4,6 +4,7 @@
 
 areas = {}
 
+areas.ie = minetest.request_insecure_environment()
 areas.adminPrivs = {areas=true}
 areas.startTime = os.clock()
 
@@ -17,7 +18,7 @@ dofile(areas.modpath.."/interact.lua")
 dofile(areas.modpath.."/legacy.lua")
 dofile(areas.modpath.."/hud.lua")
 
-areas:load()
+areas:load_db()
 
 minetest.register_privilege("areas", {
 	description = "Can administer areas."
