@@ -23,7 +23,6 @@ minetest.register_chatcommand("protect", {
 		end
 
 		local id = areas:add(name, param, pos1, pos2, nil)
-		areas:save()
 
 		return true, "Area protected. ID: "..id
 	end
@@ -59,8 +58,7 @@ minetest.register_chatcommand("set_owner", {
 				" EndPos = "  ..minetest.pos_to_string(pos2))
 
 		local id = areas:add(ownerName, areaName, pos1, pos2, nil)
-		areas:save()
-	
+
 		minetest.chat_send_player(ownerName,
 				"You have been granted control over area #"..
 				id..". Type /list_areas to show your areas.")
@@ -105,7 +103,6 @@ minetest.register_chatcommand("add_owner", {
 		end
 
 		local id = areas:add(ownerName, areaName, pos1, pos2, pid)
-		areas:save()
 
 		minetest.chat_send_player(ownerName,
 				"You have been granted control over area #"..
@@ -117,7 +114,7 @@ minetest.register_chatcommand("add_owner", {
 
 minetest.register_chatcommand("rename_area", {
 	params = "<ID> <newName>",
-	description = "Rename a area that you own",
+	description = "Rename an area that you own",
 	func = function(name, param)
 		local id, newName = param:match("^(%d+)%s(.+)$")
 		if not id then
@@ -134,7 +131,8 @@ minetest.register_chatcommand("rename_area", {
 		end
 
 		areas.areas[id].name = newName
-		areas:save()
+		areas:update_by_id(id, "name", newName)
+
 		return true, "Area renamed."
 	end
 })
@@ -207,7 +205,6 @@ minetest.register_chatcommand("recursive_remove_areas", {
 		end
 
 		areas:remove(id, true)
-		areas:save()
 		return true, "Removed area "..id.." and it's sub areas."
 	end
 })
@@ -228,7 +225,6 @@ minetest.register_chatcommand("remove_area", {
 		end
 
 		areas:remove(id)
-		areas:save()
 		return true, "Removed area "..id
 	end
 })
@@ -255,7 +251,9 @@ minetest.register_chatcommand("change_owner", {
 					.." or is not owned by you."
 		end
 		areas.areas[id].owner = newOwner
-		areas:save()
+		-- Update db record
+		areas:update_by_id(id, "owner", newOwner)
+
 		minetest.chat_send_player(newOwner,
 			("%s has given you control over the area %q (ID %d).")
 				:format(name, areas.areas[id].name, id))
@@ -280,7 +278,8 @@ minetest.register_chatcommand("area_open", {
 		local open = not areas.areas[id].open
 		-- Save false as nil to avoid inflating the DB.
 		areas.areas[id].open = open or nil
-		areas:save()
+		areas:update_by_id(id, "open", open) -- update db record
+
 		return true, ("Area %s."):format(open and "opened" or "closed")
 	end
 })
@@ -307,7 +306,6 @@ minetest.register_chatcommand("move_area", {
 		end
 
 		areas:move(id, area, pos1, pos2)
-		areas:save()
 
 		return true, "Area successfully moved."
 	end,
@@ -402,4 +400,3 @@ minetest.register_chatcommand("area_info", {
 		return true, table.concat(lines, "\n")
 	end,
 })
-
